@@ -1,4 +1,7 @@
 -- Settings
+-- Each redundant Lua box should have a unique, positive luaIdx (i.e. 1, 2, 3, ...). They will come online if all lower index Lua boxes are destroyed.
+local luaIdx = 1
+
 -- use pCall to avoid crash, retry if failed
 local AllowErrorRecovery = false
 
@@ -153,30 +156,33 @@ local TICKS_PER_S = 40
   -- and trace to that distance from origin instead of closest
 -- todo: Account for target acceleration
 
+-- Stored Variables
 -- one way to store previous values is in local variables outside of Update like this
   -- another way is to use global variables, which has the benefit of being able to be
   -- located near where they are used, but are much slower to access (requires a table lookup)
-local lastProjectilePos
-local enemies
+local inited = false
+
+local continueLine = false
+local currentLine = {}
+local currentTargetId
+local enemies = {}
+local foundMissiles = {}
 local frameTime
+local lastAim
 local lastFrameTime
-local t
-local inited
-local prevTime
 local lastOrigin
 local lastOriginSwitchTime = 0
-local currentTargetId
-local originPopTime = 0
-local lastAim
+local lastProjectilePos
 local nextRecordTime
-local trackLossTime = 0
-local continueLine = false
+local originPopTime = 0
+local prevTime
 local stabilityAvg = 1
 local stabilityWindow
-local currentLine = {}
+local t
+local trackLossTime = 0
 local turrets = {}
-local foundMissiles = {}
 
+-- Tides header
 local BlockUtil = {}
 local Combat = {}
 local StringUtil = {}
@@ -207,7 +213,6 @@ function Init(I)
   end
 
   nextRecordTime = I:GetTimeSinceSpawn()
-  enemies = {}
   if stabilityMaxTime > 0 then
     stabilityWindow = LinkedList.LinkedList()
   end
@@ -220,9 +225,7 @@ function Init(I)
 end
 
 function Update(I)
-  --I:ClearLogs()
-  --I:Log(string.format("Time Since Spawn: %.2f", I:GetTimeSinceSpawn()))
-  --I:Log(string.format("Total rotation track loss time: %.3f", trackLossTime))
+  -- I:ClearLogs()
   if AllowErrorRecovery then
     ProtectedUpdate(I)
   else
@@ -235,14 +238,21 @@ function ProtectedUpdate(I)
   if not updateRan then
     I:Log("Error in Update")
     I:Log(err)
-    return false --This means we had an error, so just move on in the LUA.
+    return false -- This means we had an error, so just move on in the LUA.
   else
     I:Log("Ran update")
   end
 end
 
 function CoreUpdate(I)
-  if not inited then Init(I) end
+  if not inited then
+    Init(I)
+  end
+  -- Redundant Lua system. Prevents this box from running until higher priority boxes have all been destroyed.
+  I:RequestCustomAxis("luaActive", 2 ^ (-luaIdx))
+  if I:GetCustomAxis("luaActive") > 2 ^ (1 - luaIdx) then
+      return
+  end
   t = I:GetTimeSinceSpawn()
   frameTime = lastFrameTime and t - lastFrameTime or 0
   lastFrameTime = t
@@ -767,7 +777,7 @@ function FireAtFirepoint(I, fp, target, ready)
                 -- angle tolerance needs to be pretty big because wInfo.CurrentDirection is unreliable for projectile weapons
                 -- hitscan weapons will not fire if they can't aim in the desired direction anyways
                 if Vector3.Angle(aim, wInfo.CurrentDirection) > 5 or not BlockUtil.fireWeapon(I, weapon, 0) then
-                  I:Log("Holding fire for aim.")
+                  I:Log("Holding fire for aim or reloading.")
                 else
                   I:Log("Fire!")
                 end
