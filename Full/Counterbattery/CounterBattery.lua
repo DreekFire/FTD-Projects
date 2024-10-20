@@ -373,7 +373,7 @@ function UpdateEnemyData(I)
                               oldAimpoints = {},
                               aimpoints = {},
                             }
-        newEnemy.density.n = 50
+        newEnemy.density.n = 15
         -- todo: set initial size estimate based on block count
         newEnemy.density.cov = Matrix3.scalarmul(Matrix3.Identity(), 2500)
         enemies[target.Id] = newEnemy
@@ -405,20 +405,32 @@ function UpdateEnemyData(I)
         local e = enemies[target.Id]
         e.oldAimpoints[idx] = e.aimpoints[idx] or target.AimPointPosition
         e.aimpoints[idx] = target.AimPointPosition
-        if (e.aimpoints[idx] - e.oldAimpoints[idx]).sqrMagnitude > 9 then
-          
-        end
       end
     end
   end
 
   for id, en in pairs(enemies) do
-    local dRot = GetRotation(en.oldAimpoints, en.aimpoints)
-    if not dRot then
-      dRot = Quaternion.identity
+    local dRot, consensusPoints = GetRotation(en.oldAimpoints, en.aimpoints)
+    if dRot then
+      RingBuffer.push(en.rotation, dRot * (en.rotation[en.rotation.size] or Quaternion.identity))
+      local changedAimpoints = {}
+      local nTrack = #newPts
+      local refIdx = consensusPoints[1]
+      local invRot = Quaternion.Inverse(en.rotation[en.rotation.size])
+      for i=1, nTrack do
+        local predicted = dRot * (en.oldAimpoints[i] - en.oldAimpoints[refIdx]) + en.aimpoints[refIdx]
+        if (predicted - en.aimpoints[i]).sqrMagnitude > 3 * 3 then
+          table.insert(changedAimpoints, invRot * (en.aimpoints[i] - en.pos[en.pos.size]))
+        end
+      end
+      -- Only update distribution if aimpoint has changed
+      Stats.updateDistributionBatched(en.density, changedAimpoints)
+      -- reduce n so distribution is allowed to change faster
+      en.density.n = min(en.density.n, 50)
+    else
+      RingBuffer.push(en.rotation, en.rotation[en.rotation.size] or Quaternion.identity)
       trackLossTime = trackLossTime + 1 / TICKS_PER_S
     end
-    RingBuffer.push(en.rotation, dRot * (en.rotation[en.rotation.size] or Quaternion.identity))
   end
 end
 
@@ -554,6 +566,7 @@ function GetRotation(oldPts, newPts, iterLim)
   for i=1, nTrack do
     indices[i] = i
   end
+  local consensusPoints = {}
   -- iterate through triples of aimpoints, check if the legs are the same length
   for trip=1, iterLim do
     -- not the most efficient as we shuffle the entire list even though we only need the first 3. Implement range shuffle later
@@ -588,10 +601,12 @@ function GetRotation(oldPts, newPts, iterLim)
           local oldDiff = oldPts[idx] - oldPts[indices[1]]
           if (diff - deltaRot * oldDiff).sqrMagnitude < 0.1 then
             votes = votes + 1
-            if 2 * votes - 3 >= nTrack then
-              return deltaRot
-            end
+            table.insert(consensusPoints, idx)
           end
+          if 2 * votes - 3 >= nTrack then
+            return deltaRot, consensusPoints
+          end
+          consensusPoints = {}
         end
       end
     end
@@ -838,6 +853,8 @@ function RunTrace(I, line, enemy, timeGuess)
     end
   end
   local tIdxClosest
+  local cov = enemy.density
+  local covInv = Matrix3.inverse(cov)
   for i = 1, timeGuess and 2 or 3 do
     -- find the point of closest approach based on current target position and velocity
     -- x(t) = x_i + v_x t
@@ -845,19 +862,34 @@ function RunTrace(I, line, enemy, timeGuess)
     -- y(t) = y_i + v_y t + 0.5gt^2
     -- squared distance = x^2 + y^2 + z^2
 
+    -- sqr Mahalanobis distance = x^T S^-1 x = (x_0 + x'_0 t + 0.5 g t^2)^T S^-1 x
+    -- x'(t) = v_i + g t
+
     -- d/dt sqrDistance = 
     -- 2 x_i v_x + 2 v_x^2 t +
     -- 2 z_i v_z + 2 v_z^2 t +
-    -- 2 y_i v_y + 2 v_y^2 t + 2 y_i g t + 3 v_y g t^2 + 0.25 g^2 t^3
+    -- 2 y_i v_y + 2 v_y^2 t + 2 y_i g t + 3 v_y g t^2 + g^2 t^3
     -- this is a cubic polynomial in terms of t which we can find the roots of
+
+    -- d/dt sqrMaha = 2 x(t)^T S^-1 x'(t) = 2 (x_i + v_i t + 0.5g t^2) S^-1 (v_i + g t)
+    -- = 2 (x_i S^-1 v_i + x_i S^-1 g t + v_i t S^-1 v_i + v_i t S^-1 g t + 0.5g t^2 S^-1 v_i + 0.5 g t^2 S^-1 g t)
+    -- = 2 (x_i S^-1 v_1 + (x_i S^-1 g + v_i S^-1 v_i) t + (v_i S^-1 g + 0.5 g S^-1 v_i) t^2 + 0.5 g S^-1 g t^3)
+
     local ti = (line.tStart + line.dt) - (timeGuess and t - (enemy.pos.size - timeGuess) / TICKS_PER_S or t)
     local di = line.ed - targetPos + ti * targetVel
     local projRelVel = line.ds / line.dt - Vector3(0, line.dv, 0) - targetVel
     -- accounting exactly for gravity changes over altitude is difficult, just approximate and hope the enemy isn't using mortars
     local g = I:GetGravityForAltitude(line.ed.y).y
-    local a, b, c = MathUtil.solveCubic(0.125 * g * g, 1.5 * projRelVel.y * g, projRelVel.sqrMagnitude + di.y * g, Vector3.Dot(di, projRelVel))
+    -- local a, b, c = MathUtil.solveCubic(0.5 * g * g, 1.5 * projRelVel.y * g, projRelVel.sqrMagnitude + di.y * g, Vector3.Dot(di, projRelVel))
+    -- when covariance matrix is the identity, this matches the case without using the covariance matrix
+    local a, b, c = MathUtil.solveCubic(
+      0.5 * Matrix3.quadform(g, covInv, g),
+      Matrix3.quadform(projRelVel, covInv, g) + 0.5 * Matrix3.quadform(g, covInv, projRelVel),
+      Matrix3.quadform(di, covInv, g) + Matrix3.quadform(projRelVel, covInv, projRelVel),
+      Matrix3.quadform(di, covInv, projRelVel)
+    )
     -- critical point is a minimum when derivative changes from negative to positive
-    -- since leading term is always positive (0.125g^2 = 12.2), if there are three roots, the first and third are minima
+    -- since leading term is always nonnegative (covariance is always positive semidefinite), if there are three roots, the first and third are minima
     -- if there is one root, it is a minimum
     -- minRoot is in seconds relative to line.tStart + line.dt
     local minRoot

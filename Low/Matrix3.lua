@@ -61,6 +61,10 @@ function Matrix3.mul(a, b)
   return Matrix3.scalarmul(a, b)
 end
 
+function Matrix3.quadform(vec1, mat, vec2)
+  return Vector3.Dot(vec1, mat * vec2)
+end
+
 function Matrix3.Identity()
   return {
     1, 0, 0,
@@ -153,7 +157,7 @@ end
 
 function Matrix3.inverse(mat)
   local det = Matrix3.determinant(mat)
-  if Stats.isZero(det) then return end
+  if MathUtil.isZero(det) then return end
   local adj = Matrix3.cofactors(mat)
   return adj / det
 end
