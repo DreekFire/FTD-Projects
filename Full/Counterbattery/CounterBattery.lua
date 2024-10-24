@@ -762,6 +762,9 @@ function FireAtFirepoint(I, fp, target, ready)
         else
           I:Log("Holding fire for player.")
         end
+        if aim then 
+          ready = ready or (idleAim == "fire" or (idleAim == "timer" and t - originPopTime > waitTime))
+        end
         if not aim then
           if idleAim == "enemy" or idleAim == "fire" or idleAim == "timer" then
             aim = target.AimPointPosition - wInfo.GlobalFirePoint
